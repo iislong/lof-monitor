@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 LOF基金溢价率监控 + 企业微信推送 + Lark 推送
 用于 GitHub Actions 定时运行
@@ -9,7 +10,6 @@ import re
 import time
 import os
 import csv
-import argparse
 import json
 from datetime import datetime
 
@@ -46,7 +46,7 @@ def fetch_premium():
     url = "https://palmmicro.com/woody/res/lofcn.php?sort=premium"
     print("获取溢价率（主列表页）...")
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
+        r = requests.get(url, headers=HEADERS, timeout=30)
         r.encoding = "utf-8"
         html = r.text
 
@@ -138,6 +138,104 @@ def fetch_prices(fund_list):
         return {}
 
 
+# ─── 限购抓取（完整）────────────────────────────────────────────────────────────
+
+def parse_money_str(s):
+    s = s.replace(",", "").strip()
+    m = re.match(r'([\d.]+)\s*万元?', s)
+    if m: return float(m.group(1)) * 10000
+    m = re.match(r'([\d.]+)\s*亿元?', s)
+    if m: return float(m.group(1)) * 1e8
+    m = re.match(r'([\d.]+)\s*元?', s)
+    if m: return float(m.group(1))
+    return None
+
+def fetch_quota_batch(codes6_batch):
+    fcodes = ",".join(codes6_batch)
+    url = (
+        f"https://fundmobapi.eastmoney.com/FundMNewApi/FundMNFInfo"
+        f"?pageIndex=1&pageSize={len(codes6_batch)}&plat=Android"
+        f"&appType=ttjj&product=EFund&Version=1&Fcodes={fcodes}"
+    )
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        data = r.json()
+        if not data.get("Datas"):
+            return {}
+        result = {}
+        for item in data["Datas"]:
+            code = item.get("FCODE", "")
+            sgzt = str(item.get("SGZT", "0"))
+            sgsxe = float(item.get("SGSXE") or 0)
+            sgba = float(item.get("SGBA") or 0)
+            if sgzt == "1":
+                status, status_text = "closed", "暂停申购"
+            elif sgzt == "3":
+                status, status_text = "closed", "封闭期"
+            elif sgzt == "2":
+                status, status_text = "limited", "限制大额"
+            elif sgsxe > 0:
+                status, status_text = "limited", "限额申购"
+            else:
+                status, status_text = "open", "正常申购"
+            result[code] = {
+                "status": status, "status_text": status_text,
+                "quota": sgsxe if sgsxe > 0 else None,
+                "big_quota": sgba if sgba > 0 else None,
+            }
+        return result
+    except:
+        return {}
+
+def fetch_quota_page(code6):
+    try:
+        r = requests.get(f"https://fund.eastmoney.com/{code6}.html", headers=HEADERS, timeout=10)
+        r.encoding = "utf-8"
+        html = r.text
+        raw_cells = re.findall(r'class="staticCell"[^>]*>(.*?)</span>\s*(?=<span|<div|$)', html, re.S)
+        cells = [re.sub(r'<[^>]+>', '', c) for c in raw_cells]
+        cell_text = " ".join(c.strip() for c in cells)
+        status, status_text, quota = "unknown", "未知", None
+        if "暂停申购" in cell_text or "暂停大额" in cell_text:
+            status, status_text = "closed", "暂停申购"
+        elif "封闭期" in cell_text:
+            status, status_text = "closed", "封闭期"
+        elif "限大额" in cell_text or "限制大额" in cell_text:
+            status, status_text = "limited", "限制大额"
+        elif "开放申购" in cell_text or "正常申购" in cell_text:
+            status, status_text = "open", "正常申购"
+        for target in [cell_text, html]:
+            for pat in [r'单日累计购买上限\s*([\d.,]+\s*[万亿]?元?)',
+                        r'单笔限购[：:]\s*([\d.,]+\s*[万亿]?元?)',
+                        r'每日累计限购[：:]\s*([\d.,]+\s*[万亿]?元?)']:
+                m = re.search(pat, target)
+                if m:
+                    quota = parse_money_str(m.group(1))
+                    break
+            if quota:
+                break
+        if quota and status not in ("closed",):
+            status = "limited"
+            status_text = "限额申购"
+        return {"status": status, "status_text": status_text, "quota": quota, "big_quota": None}
+    except:
+        return {"status": "error", "status_text": "查询失败", "quota": None, "big_quota": None}
+
+def fetch_quota(fund_list):
+    print("获取限购状态...")
+    all_codes = [f[1] for f in fund_list]
+    result = {}
+    for i in range(0, len(all_codes), 20):
+        result.update(fetch_quota_batch(all_codes[i:i+20]))
+        time.sleep(0.5)
+    failed = [f[1] for f in fund_list if f[1] not in result]
+    for code6 in failed:
+        result[code6] = fetch_quota_page(code6)
+        time.sleep(0.3)
+    print("  完成")
+    return result
+
+
 # ─── 合并数据 ────────────────────────────────────────────────────────────────
 
 def merge(premium_map, price_map, quota_map, fund_list):
@@ -184,7 +282,7 @@ def send_wecom_bot(title, content, key):
     try:
         r = requests.post(url, json=msg, timeout=10)
         if r.json().get("errcode") == 0:
-            print("✅ 企业微信群推送成功")
+            print("✅ 企业微信推送成功")
         else:
             print(f"⚠️ 企业微信推送失败: {r.json()}")
     except Exception as e:
@@ -223,11 +321,27 @@ def send_lark(title, content, app_id, app_secret, chat_id):
         print(f"❌ Lark 推送异常: {e}")
 
 
+# ─── 历史记录 CSV ─────────────────────────────────────────────────────────────
+
+def save_history_csv(rows, now_str, filepath="history.csv"):
+    file_exists = os.path.exists(filepath)
+    with open(filepath, "a", newline="", encoding="utf-8-sig") as f:
+        fieldnames = ["时间"] + [r["full_code"] for r in rows]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        row = {"时间": now_str}
+        for r in rows:
+            row[r["full_code"]] = r["premium"] if r["premium"] is not None else ""
+        writer.writerow(row)
+    print(f"历史记录已追加到 {filepath}")
+
 
 # ─── 主程序 ──────────────────────────────────────────────────────────────────
 
 def main():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
     print(f"=== LOF溢价监控 {now_str} ===")
 
     premium_map, fund_list = fetch_premium()
@@ -237,19 +351,19 @@ def main():
 
     time.sleep(0.5)
     price_map = fetch_prices(fund_list)
+
     time.sleep(0.5)
     quota_map = fetch_quota(fund_list)
 
     rows = merge(premium_map, price_map, quota_map, fund_list)
+
     save_history_csv(rows, now_str)
 
-    title, content = build_wechat_message(rows, now_str)
+    # 构建推送内容（简化版）
+    content = "\n".join([f"{r['name']} {r['full_code']} 溢价 {r['premium']}%" for r in rows[:10]])
+    title = f"LOF溢价提醒 {now_str}"
 
-    print("\n" + "─" * 60)
-    print(f"标题：{title}")
-    print("─" * 60)
     print(content)
-    print("─" * 60 + "\n")
 
     # 企业微信推送
     wecom_key = os.environ.get("WECHAT_WORK_KEY", "").strip()
