@@ -170,8 +170,8 @@ def merge(premium_map, price_map, quota_map, fund_list):
 
 def send_wecom_bot(title, content, key):
     """企业微信群机器人推送"""
-    if not content or not content.strip():
-        print("⚠️ 企业微信推送内容为空，已跳过")
+    if not key:
+        print("⚠️ 未设置 WECHAT_WORK_KEY，跳过企业微信推送")
         return
 
     url = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={key}"
@@ -186,13 +186,17 @@ def send_wecom_bot(title, content, key):
         if r.json().get("errcode") == 0:
             print("✅ 企业微信群推送成功")
         else:
-            print(f"⚠️ 企业微信群推送失败: {r.json()}")
+            print(f"⚠️ 企业微信推送失败: {r.json()}")
     except Exception as e:
-        print(f"❌ 企业微信群推送异常: {e}")
+        print(f"❌ 企业微信推送异常: {e}")
 
 
 def send_lark(title, content, app_id, app_secret, chat_id):
     """Lark 国际版机器人推送"""
+    if not (app_id and app_secret and chat_id):
+        print("⚠️ Lark 推送信息不完整，跳过")
+        return
+
     try:
         token_res = requests.post(
             "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal",
@@ -219,11 +223,11 @@ def send_lark(title, content, app_id, app_secret, chat_id):
         print(f"❌ Lark 推送异常: {e}")
 
 
+
 # ─── 主程序 ──────────────────────────────────────────────────────────────────
 
 def main():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-
     print(f"=== LOF溢价监控 {now_str} ===")
 
     premium_map, fund_list = fetch_premium()
@@ -233,30 +237,29 @@ def main():
 
     time.sleep(0.5)
     price_map = fetch_prices(fund_list)
+    time.sleep(0.5)
+    quota_map = fetch_quota(fund_list)
 
-    quota_map = {}
     rows = merge(premium_map, price_map, quota_map, fund_list)
+    save_history_csv(rows, now_str)
 
-    title = f"LOF溢价提醒 {now_str}"
-    content = "\n".join([f"{r['name']} {r['full_code']} 溢价 {r['premium']}%" for r in rows[:10]])
+    title, content = build_wechat_message(rows, now_str)
 
+    print("\n" + "─" * 60)
+    print(f"标题：{title}")
+    print("─" * 60)
     print(content)
+    print("─" * 60 + "\n")
 
     # 企业微信推送
     wecom_key = os.environ.get("WECHAT_WORK_KEY", "").strip()
-    if wecom_key:
-        send_wecom_bot(title, content, wecom_key)
-    else:
-        print("⚠️ 未设置 WECHAT_WORK_KEY，将跳过企业微信群推送")
+    send_wecom_bot(title, content, wecom_key)
 
     # Lark 推送
     lark_app_id     = os.environ.get("FEISHU_APP_ID", "")
     lark_app_secret = os.environ.get("FEISHU_APP_SECRET", "")
     lark_chat_id    = os.environ.get("FEISHU_CHAT_ID", "")
-    if lark_app_id and lark_app_secret and lark_chat_id:
-        send_lark(title, content, lark_app_id, lark_app_secret, lark_chat_id)
-    else:
-        print("⚠️ Lark 推送信息不完整，已跳过")
+    send_lark(title, content, lark_app_id, lark_app_secret, lark_chat_id)
 
 
 if __name__ == "__main__":
