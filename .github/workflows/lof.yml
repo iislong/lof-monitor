@@ -1,59 +1,40 @@
 name: LOF溢价监控
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 on:
-  
-  workflow_dispatch:
-  repository_dispatch:
-    types: [manual_trigger]
-    
-  push:
   schedule:
-    - cron: '30 1 * * 1-5'  # 你原来的时间不变
-    # - cron: '0 6 * * 1-5'  # 你原来的时间不变
-# ✅ 关键修复1：防止 GitHub 暂停定时
-permissions:
-  contents: write
+    - cron: '30 1 * * 1-5'   # UTC 01:30 = 北京时间 09:30
+  workflow_dispatch:         # 手动运行按钮
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
 
     steps:
-      - name: debug
-        run: |
-          echo "event=${{ github.event_name }}"
-      - name: 检出仓库
+      - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0  # ✅ 关键修复2：必须拉全代码，否则提交会失败
+          python-version: '3.10'
 
-      - name: 配置 Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          pip install requests
 
-      - name: 安装依赖
-        run: pip install requests
-
-      - name: 运行溢价监控
+      - name: Run LOF monitor
         env:
           WECHAT_WORK_KEY: ${{ secrets.WECHAT_WORK_KEY }}
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
-        run: python lof_notify.py
-
-      - name: 提交并推送数据
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          python lof_notify.py
+
+      - name: Commit & Push history.csv
+        run: |
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions"
           git add history.csv
-          git diff --cached --quiet || git commit -m "自动更新历史数据 $(date '+%Y-%m-%d %H:%M')"
+          git commit -m "Update history.csv" || echo "No changes"
           git push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # ✅ 关键修复3：简化推送，不会报错
